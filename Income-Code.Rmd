@@ -1,0 +1,639 @@
+---
+title: "Data Analysis of Education on Salary Potential"
+author: "Patrick Poleshuk"
+date: "3/19/2020"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=TRUE, results='hide', message=FALSE, warning=FALSE}
+error_hook <- knitr::knit_hooks$get("error")
+knitr::knit_hooks$set(error = function(x, options) {
+  if (!is.null(n <- options$linewidth)) {
+    x = knitr:::split_lines(x)
+    if (any(nchar(x) > n)) x = strwrap(x, width = n)
+    x = paste(x, collapse = '\n')
+  }
+  error_hook(x, options)
+})
+# Here I am just trying to prevent long lines of output from being cut off in the knitted pdf output. 
+knitr::opts_chunk$set(echo = TRUE)
+setwd(getwd())
+library(haven) 
+library(ggplot2)
+library(dplyr)
+library(MASS)
+library(tidyr)
+library(broom)
+library(tinytex)
+library(car)
+```
+
+## Data Analysis of Education on Salary Potential 
+With college tuition, in the United States, seemingly rising exponentially higher than contemporary stagnent wages, I wanted to conduct a brief study on the effects that educational attainment have on one's salary potential. In this manner, we can get a general idea of how the monetary utility of a bachelors degree reflects the rising costs of obtaining one. The data frame I will be working with comes from IPUMS - USA, and the microdata used was supplied through censuses and surveys throughout the 2017 and 2018 years. 
+
+## Cleaning Up The Data
+```{r Filtering, message=FALSE, warning=FALSE}
+df <- read_dta("Desktop/usa_00004.dta.gz")
+# The data used is imported from Stata, and requires the "haven" package 
+# to open since Stata data files end in .dta. 
+df <- dplyr::select(df, educd, incwage, sex)
+View(df)
+# For this analysis I am only concerned with the columns of education, wages, and if the
+# person is male or female. 
+NROW(df)
+# There are 6,404,579 rows of data per colummn, so I will need to cut it down a bit for my graphs
+# and plots to run effectively. 
+attach(df)
+df$Level[educd < 63] <- "Primary_School"
+df$Level[educd >= 63 & educd <= 100] <- "High_School"
+df$Level[educd > 100 & educd <= 113]  <- "Bachelor's"
+df$Level[educd == 114] <- "Master's"
+df$Level[educd >= 115 & educd <= 116] <- "Doctoral/Professional"
+detach(df)
+# Here I recoded the variables for Educational Attainment, so it's more easily visible what each
+# level means. The codebook for the data, provided by IPUMS, tells us what each number in a
+# non-numerical column stands for. 
+attach(df)
+df$Test[educd <= 100] <- "Not_College"
+df$Test[educd >= 100 & educd <= 116] <- "College_More"
+detach(df)
+# I recoded the variables in a more general way. 
+# Here I created a column which only measures whether a person has completed college or not.
+names(df) <- c("Education_Num", "Salary", "Sex", "Level", "Test")
+# For clarity, I changed the column names. We have the three from "select()" 
+# in addition to the two recoded ones. 
+df <- mutate(df, Gender = ifelse(Sex == 1, 'Male', 'Female'))
+# If we just want to recode a variable with only two outcomes, then we can use the "ifelse" command. 
+# If "Sex" is equal to "1" in the data frame, then that person is Male. If otherwise, the person
+# is Female.
+
+df <- filter(df, df$Salary < 999998)
+# I will be eliminating any extremely high incomes, as they will
+# certiantly skew our data and make our inferences less precise. 
+df <- filter(df, df$Salary > 0)
+# I decided to eliminate observations where there is no income statment, 
+# given that a salary of 0 would indicate that the people is unemployed, 
+df %>% filter_all(any_vars(is.na(.)))
+# Here, even though I don't believe there are any NA values in "df", I filtered out any
+# incomplete cells and rows.  
+quantile(df$Salary, probs = c(.25, .75), na.rm = TRUE)
+# I am going to start removing large outliers, so I want to know the 25% and 75% quartiles. 
+# All the outliers lie in "Salary" because it is the only numeric column. 
+
+fix <- 400000 + (1.5 * IQR(df$Salary))
+fixx <- 15600 - (1.5 * IQR(df$Salary))
+df <- filter(df, df$Salary < fix)
+df <- filter(df, df$Salary > fixx)
+max(df$Salary)
+min(df$Salary)
+# Here I filtered out all the observable outliers in my data frame, using the outliers formula. 
+# The formula will eliminate any observation below (Q1 - 1.5 * IQR) and above roughly 460,000
+# The reason why I didn't use the df third quartile for the upper division cutoff is that it would
+# cut any income statement at around $135,000. This would simply be too low of a cutoff, 
+# if we consider 2017 inflation rates and the various CPI indices where making 
+# around $150,000 would render a family of 4 or more not extremely well off. 
+n <- round(NROW(df)/1.0005)
+df_new <- df[n:NROW(df), ]
+df_new
+# I realized, while plotting the data, that there are simply too many observations in order to
+# read the graph. You can see here that I am only concerned with the last .05% of the roughly 3
+# million observations in "df". Without omitting these observations, my graphs would be
+# unreadable and would hardly load properly. 
+str(df_new)
+# Our new data set, which we will use for plotting analysis, is now made up of only 1,476
+# observations. This is much easier to plot than the 2,952,469 complete 
+# observations in our original data set. 
+```
+
+## Analysis of The Data Through Correlation, Hypothesis Testing, Generalized Linear Models, and Non-Linear Models.
+```{r Analysis 1, message=FALSE, warning=FALSE}
+# For conducting the majority of my analysis I will use the original data frame, "df". 
+# "df_new" will only be utilized for models in which I need to plot the observations.
+# I found out later, through plotting the total observations of the original data frame, that the
+# quantity of observations is so large that it nearly filled up the entire plot space and made
+# analysis impossible. This was the reason for creating df_new, even if it is a little less precise. 
+
+#------
+
+# I will list the T-test for "df_new", only to prove that the p-value is also statistically
+# signficant compared to "df". 
+Male <- (df$Gender == "Male")
+Female <- (df$Gender == "Female")
+# To make "Gender" more understandable in my generalized linear models, I created the variables
+# "Male" and "Female".
+Male_ <- (df_new$Gender == "Male")
+Female_ <- (df_new$Gender == "Female")
+# Here are the same created variables for the "df_new" data frame, but with an underscore next to
+# the variable. 
+
+s <- split(df, df$Level)
+# Before hypothesis testing, I wanted to do a quick analysis of the average salary that falls
+# under each Education Level. 
+# I split the data frame by the 5 education levels I created. 
+# "Primary_School", "High_School", "Bachelor's", "Master's" and "Doctoral/Professional". 
+sapply(s, function(x) colMeans(x[, c("Salary")],
+                               na.rm = TRUE))
+# Here I used the "sapply" function to go over each of the 5 split lists,
+# for the purpose of delivering the column means of each of the list salaries. 
+# We can see the average bachelor holder earns on average $64,444.93
+# compared to the average high school graduate who earns $36,118.28, on average annually. 
+# The highest earning group, as one might believe, are holders of Doctoral or Professional Degrees
+# at $112,733.70.
+
+#------
+
+Salary <- df$Salary
+Sex <- df$Sex
+Education_Num <- df$Education_Num
+Education_Level <- df$Level
+
+Salary_ <- df_new$Salary
+Sex_ <- df_new$Sex
+Education_Num_ <- df_new$Education_Num
+Education_Level_ <- df_new$Level
+
+# Here, I just wanted to draw some space between the classification 
+# of the variables "df" and "df_new", to prevent confusion. The df_new variables 
+# will have an underscore next to them, when compared to the "df" variables. As you will 
+# see, I am saving some time in my further analysis by simplifying the variables. 
+
+# I will only be using the "df_new" variables for more clear plotting purposes, 
+# not for the raw data analysis portions. 
+
+round(mean(Education_Num[which(Salary > mean(Salary))]))
+# With this code I determine what the average Education value is, when an individual's salary is
+# greater than the average salary examined; it is 90, which tells us that a person earns a
+# greater than average salary when they have 3 years of college as experience or have
+# earned an associate's degree. 
+mean(Salary[which(Education_Num > mean(Education_Num))])
+# Conversely, I evaluate the average salary of an individual when they have an above average
+# education value. We can find that one would earn $67,234.26 in this case. 
+
+#-------
+summary(Education_Num_)
+x <- seq(from = 2, to = 116)
+mu2 <- mean(Education_Num_)
+sigma2 <- sd(Education_Num_)
+density <- dnorm(x,mu2,sigma2)
+plot(x, density, type = "l", xlab = "Education Value", ylab = "Probability Density")
+abline(v=mu2)
+
+# Here I am going to be creating a simple, normal distribution of both 
+# the education values and salaries.
+
+# We can see that this distribution is slightly skewed to the
+# left, as more people tend to have higher education qualifications
+# than corresponding lower qualifications. Distributions such as 
+# these allow us to make inferences about the degree levels of our 
+# studied population. Given that an education value of 114 equates 
+# to a Masters degree level qualification, we can, for example, 
+# analyze things such as what percent of the people in our data
+# set, with respect to the year 2017, have recieved a doctoral or professional degree.
+
+z=(114-mu2)/(sigma2)
+(1 - pnorm(z)) * 100
+
+# We can see here, from the Z-value, that roughly 2.98% of our data set has a Doctoral 
+# or Professional degree.
+
+mu <- mean(Salary_)
+sigma <- sd(Salary_)
+n <- nrow(df_new)
+
+summary(Salary_)
+x <- seq(from = min(Salary_), to = max(Salary_), by = .25)
+density <- dnorm(x, mu, sigma)
+plot(x, density, type="l", xlab = "Salary ($)", ylab = "", las=1)
+abline(v = mu)
+# If we wanted to, for example, find the probability of people who
+# make over 70,000 USD during the 2017 year, we can compute the area
+# under the Z-score which that point corresponds to. 
+z=(70000-mu)/(sigma)
+(1 - pnorm(z)) * 100
+# Here we see that only roughly 21.97% of people in the United
+# States, during the year 2017, made over 70,000 dollars. 
+
+#-------
+cor.test(Salary, Education_Num)
+# Here is a correlated test, which tells us the Pearson's correlation coefficent "r" at .3670728. 
+# Given that there are so many factors that affect salary potential, we can expect to see this
+# weak correlation. Nevertheless, the coefficent denotes a weak/moderate positive linear
+# relationship between salary growth and education completed. 
+Male__ <- as.numeric(Male)
+# Since the correlation test can only accept numeric vectors, 
+# we need to create a variable for "Gender" or "Sex", in this case I use "Male", as a numeric
+# class.  
+cor.test(Salary, Male__)
+# The Pearson's correlation coefficent is .1627632, which signals a weak positive linear
+# relationship between predicted salary and being a male. 
+var.test(Salary, Education_Num)
+var.test(Salary, Male)
+# We can already assume that all my variables don't have equal variances, but we can compare them
+# anyway. Conducting an F-test for equal variance, we find that in both cases the ratio of
+# variances isn't even close to 1. 
+t.test(Salary[Male], Salary[Female], paired = FALSE, var.equal = FALSE)
+t.test(Salary_[Male_], Salary_[Female_], paired = FALSE, var.equal = FALSE)
+# We can see that both of these T-tests yield an extremely low p-value / high t-score. 
+# Therefore, we can reject the null, that being male or female yields the same effect on one's
+# salary at the 1%, 5%, and 10% significant levels. 
+#-------
+
+Not_College <- (df$Test == "Not_College")
+College_More <- (df$Test == "College_More")
+# Here I am preparing for another T-test, by assigning variables that make inserting the code
+# much easier. These are the variables for the original data frame, "df".
+#-------
+Not_College_ <- (df_new$Test == "Not_College")
+College_More_ <- (df_new$Test == "College_More")
+
+# These are the variables for the "df_new" data frame.
+#-------
+
+t.test(Salary[Not_College], Salary[College_More], paired = FALSE, var.equal = FALSE)
+t.test(Salary_[Not_College_], Salary_[College_More_], paired = FALSE, var.equal = FALSE)
+# Both T-tests, whether they are inputed with data from "df" or "df_new" show off a p-value of
+# essentially 0. From this p-value, we can reject the null hypothesis that not graduating college
+# and graduating college have the same effect on one's salary, at the 1%, 5%, and 10% significant
+# levels. 
+
+model <- glm(Salary ~ Education_Level)
+model
+# Here is a generalized linear model, essentially a flexible form of an ordinary linear
+# regression. I will continue to use this generalization model because my independent variables
+# are not of a numeric class. In the model, with a beta(0) of $64,445, we can see that the effect
+# that earning a master's degree 
+# has on your salary is $13,424, while the effect of completing a doctoral or professional degree 
+# has a $48,289 increase on your salary. 
+# Given that we don't see the monetary effect that a bachelor's degree has on one's salary, we 
+# know it serves as the baseline under this scale. With a high school education effect of 
+# -$28,327, we can declare that this is the same as saying that, annually, 
+# a bachelor's degree, on average, will yield you $28,327 more than what only 
+# high school diploma holders recieve. Lastly, I want to note that "AIC" stands 
+# for Akaike Information Criterion and its value essentially describes how
+# large the discrepancy is between the observed values and the values predicted by the linear model; 
+# a relatively similar AIC value between my regressions would signify 
+# that there is little information lost in the model representation. # For the purpose of my analysis, I won't really be using it but one can see that all the
+# generalized linear models that I run will have a relatively similar AIC value to each other. 
+# The AIC value by itself isn't very useful to interpret, 
+# and it really doesn't matter that much given that I will be using "df_new" for all my plotting. 
+model.2 <- glm(Salary ~ Education_Level + Male)
+model.2
+# Here we have an example of a multi-linear regression, with the gender, "Male", acting as a
+# control variable. 
+# Adding this control variable into this generalized regression, we can see that our beta(1)
+# effect coefficents, along with our intercept value, have changed a little bit. Futhermore, it
+# states that if you are male, you will recieve $18,893 more in a salary than if you are a female.
+# Further analysis can elucidate on why males seem to earn more, yet it seems that men benefit
+# from a signficant salary boost when compared to women. 
+
+glm(Salary ~ College_More)
+# For this generalized linear model, I used the "College_More" independent variable which I recoded 
+# in the column "Test". We can see that if you have completed a bachelor's degree or more, you 
+# will earn $39,074 more than if you have not completed any university level degree.
+
+model.fit <- glm(Salary ~ Education_Num)
+model.fit
+# Here I created a linear model with the Education values acting as the independent variable in 
+# the regression. While this isn't particularly interesting unless you have seen the codebook,
+# the model asserts that for every level of education completed, you will earn $828.7, holding all
+# else constant. 
+rsq <- with(summary(model.fit), 1 - deviance/null.deviance)
+rsq * 100
+# "rsq" stands for "r^2" which is the coefficent of determination in a linear model. In this
+# model, it tells us how much of a variance in salary can be explained by a variance in number of
+# Education values attained. Normally, in a standard Ordinary Least Squares (OLS) regression, the
+# r squared value can be found in the summary description, but for a generalized linear model we
+# need to subtract 1 from the residual deviance that is divided by the null deviance. If the
+# difference between the two deviances is small, the model is expressing the majority of the
+# deviance in the null which may indicate that the predition displayed by our beta(1) value is 
+# not all that different from the prediction displayed by our beta(0) value. In this case the r^2
+# value is 0.1347424, which would indicate that only
+# 13.475% of a variancee in salary is explained by a variance in Education values completed. 
+model.3 <- glm(Salary ~ Education_Num + Male)
+rsq.2 <- with(summary(model.3), 1 - deviance/null.deviance)
+rsq.2 * 100
+# I ran the generalized linear model again, this time with the control variable "Male". In
+# contrast to the aformentioned r^2 value, this new model gives us a value of 0.1708435. This
+# indicates that over 17% of a variance in salary is explained by a variance in education values
+# and the gender of the person in question. If we wanted to raise this coefficent of
+# determination value, it stands to reason that we could continue to add control variables to the
+# linear model; for example, we could continue to control for race, geographic placement, and the
+# quantative nature of the education in question. 
+
+Sex <- as.factor(Sex)
+# Here I am setting up a binary logistic regression, for my variables of "Salary" and "Sex". As
+# you will see, I will attempt to create a model in which Male and Female are used as my two
+# classes for a specific salary quantity to fall under. In contrast to a linear model, I am
+# attempting the classify my numeric observations by "Gender". 
+Non_linear <- glm(Male ~ Salary, family = "binomial")
+Non_linear
+# This logistic regression is a little awkward to interpret. Holding all else constant, however,
+# we can see that for every $1 increase in salary, there is a 7.567e-06 log probability increase that
+# that person is male. This isn't very important, as I am really only interested in visualizing
+# this model.
+
+# You will notice that I used the df_new variable for some of my binary logistic regressions, 
+# instead of the normal "df" data set and that is because the df_new version of 
+# the plot offers much more fluidity for plotting. 
+
+Sexcode <- ifelse(df_new$Gender == "Female", 0, 1)
+# In a binary logistic regression, the y axis needs to be "ylim(0, 1)". That is, I am having
+# "Female" equate to 0 while "Male" is equated to 1. 
+
+logit.model <- glm(Sexcode ~ Salary_, family = "binomial")
+summary(logit.model)
+plot(Salary_, jitter(Sexcode, .15), pch = 19,
+     ylab = "Sex (0 - Female, 1 - Male)",
+     xlab = "Salary ($)",
+     main = "Binary Logistic Regression")
+xv <- seq(from = -100000, to = max(Salary_), 1)
+yv <- predict(logit.model, list(Salary_ = xv), type = "response")
+lines(xv, yv, col = "darkblue")
+
+# There is a decent amount going on here in this code chunk, so I will try to simplify it to the
+# best of my ability. Starting off with the logistic model, you'll notice that it is nearly the
+# same one as before, but with Sexcode acting as the y variable against the "df_new" version of
+# salary. For the x-axis, I wanted to plot this data in a sequence from the lowest salary to the
+# highest; this is the purpose for my "xv" variable. You will also notice the "jitter()" command
+# which is done to avoid overplotting the observations. In other words, we want to avoid a
+# large number of overlapping observations by adding random noise, which can give us a better
+# idea of how concentrated the data actually is. Within the plot, the "xlab", "ylab", and "main"
+# commands allow us to give a name to the x-axis, y-axis, and title. The "yv" variable is the
+# predicted value of "Sex", given the input of what salary is, that is based on the aformentioned
+# binary logistic model. Lastly, the "lines()" command draws the "sigmoid curve" in the logistic
+# regression. In a way, this curve is for the probabilistic model of salary given our binary
+# variable of Sex. You'll notice that it isn't completely s-shaped, which confused me at first
+# given that we had statistially signficant p-values at all significant levels. However, I
+# realized that this is partially due in fact to how much data variance there is on both females
+# and males; that is, it is  difficult for the curve to exactly lead upward to the gender that earns
+# the highest salary. Neverthless, we can see that there is a higher data concentrated, along the
+# x-axis, for males, as we have already established that they tend to earn higher salaries than 
+# their female counterparts. 
+
+library(popbio)
+# Normally, I would just leave the "library()" command with the installed package in the set up
+# portion of this R markdown file, but I only use it for this specific case to show a more
+# detailed binary logistic regression. 
+logi.hist.plot(Salary_, Sexcode, type = "count", boxp = FALSE, xlabel = "Salary ($)", 
+ylabel2 = "Freq", mainlabel = "Logistic Regression of Sex on Salary")
+# This command blends the logistic regression with a histogram, detailing at the frequency
+# distribution. We can see, from the histogram, that there is a larger level of concentration at
+# lower salaries for females and a slightly higher conentration for males, at higher salaries.
+# Again, the data variance is large for both females and males so the line isn't a perfect
+# s-shape but instead represents a strong curve. 
+
+Collegecode <- ifelse(df$Test == "Not_College", 0, 1)
+
+# Here, I am going to be performing the same act, but with a probit model, which is nearly 
+# identical to the logistic regression. I am going to test how 
+# salary varies, depending on whether one has a university degree or not. 
+
+logit.model <- glm(Collegecode ~ Salary, family = "binomial" (link = "logit"))
+summary(logit.model)
+exp(2.046e-05)
+# For every $1 increase in your salary, your log odds of going to college 
+# increase by 2.046e-05. More simply put, you are (exp(2.046e-05)) 1.00002 
+# more times likely to go to college for every $1 increase in your salary. 
+
+Collegecode2 <- ifelse(df_new$Test == "Not_College", 0, 1)
+probit_reg <- glm(Collegecode2 ~ Male_, family = "binomial" (link = "probit")) 
+probit_reg
+exp(-.1041)
+# Here, we are analyzing a probit model to test the probability that you attend college 
+# based off your gender. Given that both these variables, the independent 
+# and the dependent, are of a non-numerical class, it would be best to interpret 
+# the regression rather than plot it. In these findings, we can see that if 
+# you are male your log odds of going to college are reduced by -.1041. 
+# More intuitively, the the probability that you go to college if you are male 
+# is roughly .901, when compared to a female probability of 1. This is supported by 
+# existing evidence that, in the United States, there more college educated women than men. 
+
+n <- round(NROW(df)/1.03)
+df_plot <- df[n:NROW(df), ]
+df_plot
+
+# I wanted to plot all the observations on the original data set "df", 
+# but given that there are roughly 3 million observations my computer is 
+# unable to handle the output in the knitted PDF. Instead I just used 3% of these 
+# total observations, and end up with the same results just using 90,629 observations. 
+
+Collegecode3 <- ifelse(df_plot$Test == "Not_College", 0, 1)
+pro <- ggplot(df_plot, aes(x=df_plot$Salary, y=Collegecode3)) + geom_point() +
+  stat_smooth(method = "glm", method.args = list(family = "binomial" (link = "probit")), se=TRUE)
+pro + labs(x="Salary ($)", y="College (0 - No, 1 - Yes)", 
+title = "Probit Regression of College Education on Salary") 
+# Using the "ggplot" package will provide us a more simplified way of plotting 
+# our probit model. We can see that a "S-shaped" curve is nearly in sight, and 
+# that people who obtain a college degree generally enjoy higher salaries than 
+# those who don't graduate.
+
+Polyreg <- glm(df$Salary ~ df$Education_Num + I(df$Education_Num^2))
+Polyreg
+
+# In this polynomial regression, I am attempting to see if, from the education 
+# values we have observed in the data frames, there are diminishing marginal returns 
+# (DMU) on the already positive educational effect on predicted salary. 
+# While the idea of DMU for these variables would logically make sense, 
+# in this data analysis we are observing a fixed set of different levels of 
+# education, not assuming that education will continue indefinitely. This is why 
+# we don't observe much use for this polynomial regression. On the other hand, 
+# if we use the "df_new" data set, we can observe such a phenomenon. 
+New_Quadratic_reg <- glm(df_new$Salary ~ df_new$Education_Num + I(df_new$Education_Num^2))
+New_Quadratic_reg
+
+# Here, just out of the nature of how this data is set up, in the bottom .05% 
+# of the main data set, we can see a DMU case that the effect of education has 
+# on salary potential. For every increase in education level, there is a $483.5712 
+# positive effect on salary, but we also see for every 1 increase that is squared 
+# we will experience a $0.3721 decrease in salary potential.
+```
+## Plotting My Data 
+
+```{r Plotting, message=FALSE, warning=FALSE}
+model <- glm(Salary_ ~ Education_Num_)
+e <- resid(model)
+plot(fitted(model), e,
+    xlab = "Salary ($)",
+    ylab = "Residuals",
+    main = "A Plot of The Residuals")
+abline(0, 0)
+# What we can see from this residual plot is that the resiudal deviation does not follow a
+# random pattern but, instead, a downward straight line pattern. This gave me the 
+# indication that perhaps a non-linear model would be the best fit for the "df" 
+# dependent variable, "Salary", against the independent variable "Education_Num". 
+# If, under any circumstance, the residual deviation is not random, we can assume 
+# that there exists some explanatory information that our model isn't
+# telling us. Since the residual plot was created with a standard generalized linear model, we
+# can assume that a simple linear model isn't telling us all the information that we need. 
+
+# While it may appear odd, I believe long vertical lines in my residual graph 
+# is to be expected when modeling numeric data around my categorial data, 
+# "Education_Num_". Observations for salaries between education levels are 
+# somewhat limited, so we won't be seeing random, homoskedastic residual patterns 
+# that fully numeric data types can give off. Either way, given the categorical 
+# nature of my data, it seems that a probit or logistic regression,
+# as seen before, would best suit my analysis. 
+
+
+lambdas <- 10^seq(3, -2, by = -.1)
+Ridge_regression <- lm.ridge(Salary_ ~ Education_Level_, lambda = lambdas)
+td <- tidy(Ridge_regression)
+ggplot(td, aes(lambda, estimate, color = term)) + geom_line() + 
+  ggtitle("Ridge Regression Plot") + labs(y = "Estimated Coefficent",
+                                          x = "Ridge Parameter")
+# Here, I am creating Ridge Regression, which accounts for a small bias factor in my
+# explanatory coefficents to offset potential problems with multicollinearity. The nature of the
+# regression will be explained in the next few sections, but for now we can just create a quick
+# ridge regression plot to test the quality of our independent and dependent variables. In this
+# plot, moving along the "Ridge Parameter" represents an increase in the value of lambda. The
+# larger our value of lambda, the more we are penalizing our various coefficents. All these
+# values are approaching 0, but the values that approach 0 the fastest are the ones that are the
+# least efficent in our regression. It seems that my Education Levels of "Primary_School" and
+# "High_School" are shrinking the fastest, but it should be remembered 
+# that these coefficents are less accurate because my "df_new" variable is 
+# only using .05% of the total number of the original data frame observations. 
+
+check <- glm(Salary_ ~ Education_Level_ + Male_)
+vif(check)
+# In addition, we can also test the variance inflation factor "vif" for our linear regression
+# model with the control variable "Male_". In the results, we find that there is no issue with 
+# multicollinearity between the variables of gender and education value, as they have a vif value
+# that is very close to 1. A vif value of 1 indicates that there is no concerning correlation
+# between our two predictor values in explaining their respective effects on salary. 
+t <- table(Education_Level_, Male_)
+chisq.test(t)
+# If we want to test for multicollinearity, which will be explained in the ridge regression
+# analysis, we can also use a chi squared test. Normally we would use a Peason's correlation
+# test, but the values we are trying to correlate are both non-numeric, so the chi squared test
+# is going to be our best choice. What we find here is that there is some dependence between our 
+# independent variables of Education_Level_ and Male_. Our p-value is
+# significant at around the 5% level, so we can reject the null hypothesis and 
+# state that these two explanatory
+# variables are somewhat correlated to each other; there is some relationship between one's
+# education level and sex. However, it should be noted, from the variance inflation factor analysis, 
+# that this doesn't seem to create problems in quantifying the effect on salary. 
+tt <- table(Education_Level_, Education_Num_)
+chisq.test(tt)
+# Here is my way of getting around the problem of a ridge regression with
+# "Education_Num_", as to use "linearRidge()" 'x' must be an array of at least two dimensions. I
+# have, in general, been using Education_Num_ for my dependent variable instead of
+# Education_Level_, but in this chi squared test we can see that the chi squared value is
+# extremely large and that the p-value is extremely low. This tells me that these two
+# variables exhibit nearly perfect multicollinearity, and I can use Education_Level_ instead of
+# Education_Num_ in my ridge regression.
+vif(glm(Salary_ ~ Education_Level_ + Education_Num_))
+# Alternatively, and if we are concerned with the inaccuracy of our chi-squared test, if we
+# examine the vif values for these two variables, we will find that they
+# are far above 1. The vif value lies at 8.365892, suggesting that they are
+# highly correlated apropos to their effects on salary, and that we can substitute
+# Education_Level_ for Education_Num_ in our ridge regression without running into issues. 
+library(ridge) 
+# "linearRidge()" requires the ridge package. I am using this command instead of "lm.ridge()"
+# beacause it shows off the p-values in the regression.
+n <- round(NROW(df)/1.005)
+df_ridge <- df[n:NROW(df), ]
+df_ridge
+# Given that we saw that some variables, out of the lack of sufficient 
+# observations, are imprecise, to see the clear effect of a ridge regression compared 
+# to a normal linear regression we should use a larger data set. I can't use 
+# "df_plot" unfortunately because it signals an error of vector memory exhausted. 
+# This leads me to believe that my computer is unable to handle that amount of data 
+# in the "linearRidge()" command.
+Ridgemodel <- linearRidge(data = df_ridge, Salary ~ Level + Sex)
+summary(Ridgemodel)
+summary(glm(data = df_ridge, Salary ~ Level + Sex))
+
+# We have already identified, from the chi squared test, that very little multicollinearity 
+# is present within the independent variables of the regression. We can also see 
+# that it doesn't have much effect on the p-values of the regression. 
+# Multicollinearity occurs when different explanatory variables in 
+# our regression are linearly related with each other, but since we haven't observed 
+# any egregious cases of this we can expect our coefficents not to have changed 
+# very much. Our ridge regression has changed our regression 
+# coefficents only somewhat, as the issue of any extant multicollinearity 
+# can be persumed to have been fixed. As one last regression model analysis, we 
+# can see that for the ridge regression, one can expect a $63,126 increase in salary 
+# with a Doctoral/Professional Degree and a $10,174 increase in salary with a 
+# Master's degree, holding a Bachelor's degree at baseline 0 and holding all else 
+# constant. One can expect to earn $42,626 less than a Bachelor's degree holder 
+# with only a primary school education, and $23,325 less than a Bachelor's degree 
+# holder with a high school diploma. 
+g <- ggplot(df_new, aes(x = Level, y = Salary, fill=Level))
+# Here is the basic set-up for "ggplot". In this line, I am just identifying the data frame,
+# aesthetic mapping my columns of interest, and filling them in with identifiable colors. 
+g + geom_boxplot() + geom_jitter(width = .5, size = 1) +
+  labs(title = "Education on Future Income",
+       x = "Education Level",
+       y = "Salary ($)",
+       subtitle = "How Education Affects Salary Potential",
+       caption = "Source: IPUMS") +
+  theme(axis.text.x = element_text(angle = 65, vjust = 0.6))
+# Here I use and will continue to use the "ggplot2" package, to create somewhat expansive graphs
+# that are aesthetically appeasing to view. As was stated before and as one can see in the
+# various boxplots, Doctoral/Professional degree holders will earn the highest salary, with the
+# largest 1st and 3rd quartiles and median value. It is interesting to see that, of my
+# observations in the "df_new" data set, the majority of people seem to have the highest
+# educational level of a high school diploma, with a bachelor's degree appearing to be second in
+# that list. 
+
+plot(Salary_, Education_Num_, xlab = "Salary ($)", ylab = "Education Value", col = "darkblue",
+     main = "How Education Value Determines Salary Potential")
+# Here is just a simple plot of Salary quantity, with regard to the value of Education completed.
+# We will see a more advanced version of this plot a little later, but, for now, we can conclude
+# that so much variance in salary by education level makes inferences about populations a little
+# difficult. 
+
+qqnorm(Salary_, ylab = "Salary ($)")
+qqline(Salary_, col = "purple")
+# Here is a quantile-quantile plot that I had decided to add just to verify if our dependent,
+# numerical, variable is normally distributed. As it turns out, while it is not completely
+# normally distributed, there is still a decent amount of observations that lie on our normally
+# distributed qqline. The slightly curved nature of it indicates a postive skew in our data. 
+# Going back to our earlier hypothesis testing, our parametric t-test methods
+# are justified by the distribution of "Salary" in our data set. 
+
+g <- ggplot(df_new, aes(x = Education_Num_)) + geom_histogram(fill = "salmon", 
+                                                              color = "darkblue", binwidth=1)
+g <- g + geom_vline(xintercept = mean(Education_Num_), size = 3)
+g <- g + ggtitle("Counting Education Values") + 
+  labs(x = "Education Values",
+       y = "# of Occurances")
+g + scale_y_continuous(expand = c(0,0))
+
+# Here is a rather basic histogram that I just created to illustrate the average Education value
+# that our observations yield. The mean level of Education values is somewhere between 60 and 90.
+# I would put it at roughly 76, which would indicate that our average observable individual has
+# completed between 1-2 years of college. 
+
+freqData <- as.data.frame(table(Salary_, Education_Num_))
+names(freqData) <- c("Salary", "Education_Num", "Frequency")
+freqData$Salary <- as.numeric(as.character(freqData$Salary))
+freqData$Education_Num <- as.numeric(as.character(freqData$Education_Num))
+g <- ggplot(filter(freqData, Frequency > 0), aes(x = Salary, y = Education_Num))
+g <- g  + scale_size(range = c(2, 10), guide = "none" )
+g <- g + geom_point(color="grey50", aes(size = Frequency+20))
+g <- g + geom_point(aes(color=Frequency, size = Frequency))
+g <- g + scale_color_gradient(low = "lightblue", high="white") +
+  ggtitle("Illustrated Regression of Education on Salary Potential") +
+  labs(x = "Salary ($)",
+       y = "Education Value")
+Ridge_model_new <- linearRidge(Education_Num_ ~ Salary_ + Male_)
+g <- g + geom_abline(intercept = coef(Ridge_model_new)[1], slope = coef(Ridge_model_new)[2], 
+                     size = 3, color = "red")
+g
+# As a final graph, I improved upon my standard "plot()" command that I had used earlier in this
+# section. To give credit, I borrowed this code from a book I was reading, titled "Regression
+# Models for Data Science in R", by Brian Caffo. This plot, I find, is superior because it
+# doesn't just fix the overplotting issue and make it pleasing to the eyes but with the "ggplot2"
+# package you can fit your regression line on the plot. In this case, you'll notice I fit my
+# ridge regression model on the plot and switched the independent and dependent variables around
+# so that it would yield a meaningful regression line. Upon first look, the regression line might
+# seem a little flat, but this is what we can expect from data that is highly spread; for
+# something as variable as salary is, extensive control variables will almost definitely be
+# needed if we are to obtain a steeper curve. 
+
+```
+## Conclusion 
+As was stated before, future work can be done in explaining a greater variance in salary, given a variance in our inputed variables. I could have added in control variables that account for such things as race, type of education, occupation training acheived, prior work experience, age, marriage status, criminal history, etc. However, I was mainly concerned with using education as a predictor for future earnings. As it turns out from the above pages of various data observation, there is a lot of different testing that can be conducted and a lot of biases that can be controlled for at multiple steps in our analysis. While my explanations and findings after the individual lines of code already sum up my analysis pretty well, I will leave off with the note, from what was observed, that what is certain is that education can only explain a fairly small amount of variance in salary. Whether a certain degree is “worth getting” or not depends on a myriad of variables, variables such as these must be accounted for if we are to further pursue with an inferential analysis.
