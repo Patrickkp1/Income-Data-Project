@@ -17,7 +17,7 @@ knitr::knit_hooks$set(error = function(x, options) {
   }
   error_hook(x, options)
 })
-# Here I am just trying to prevent long lines of output from being cut off in the knitted pdf output. 
+# Here I was just trying to prevent long lines of output from being cut off when I converted this original project into a knitted pdf output. 
 knitr::opts_chunk$set(echo = TRUE)
 setwd(getwd())
 library(haven) 
